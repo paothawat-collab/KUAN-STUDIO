@@ -33,34 +33,31 @@ const STEPS = [
   { id: 5, who: "meen", label: "ส่งมอบแคปชั่น" },
 ];
 
-/* ───────────────────────── helper: เรียก Claude (ใช้ API key ของคุณเอง) ───────────────────────── */
-async function askClaude(key, parts) {
-  const models = ["claude-sonnet-4-6", "claude-sonnet-4-5", "claude-sonnet-4-20250514"];
+/* ───────────────────────── helper: เรียก Gemini (text) ───────────────────────── */
+async function askGeminiText(key, parts) {
+  const models = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"];
   let lastErr = null;
   for (const model of models) {
-    const res = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": key,
-        "anthropic-version": "2023-06-01",
-        "anthropic-dangerous-direct-browser-access": "true",
-      },
-      body: JSON.stringify({
-        model,
-        max_tokens: 1500,
-        messages: [{ role: "user", content: parts }],
-      }),
-    });
-    const data = await res.json();
-    if (data.error) {
-      lastErr = new Error(data.error.message || "Claude API error");
-      if (data.error.type === "not_found_error") continue; // ลองรุ่นถัดไป
-      throw lastErr;
-    }
-    return (data.content || []).map((c) => c.text || "").join("\n");
+    try {
+      const res = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(key)}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            contents: [{ parts }],
+            generationConfig: { temperature: 1.0, maxOutputTokens: 2048 },
+          }),
+        }
+      );
+      const data = await res.json();
+      if (data.error) { lastErr = new Error(data.error.message); continue; }
+      const text = data.candidates?.[0]?.content?.parts?.map(p => p.text || "").join("") || "";
+      if (!text) { lastErr = new Error("Gemini ไม่ได้ส่งข้อความกลับมา"); continue; }
+      return text;
+    } catch (e) { lastErr = e; }
   }
-  throw lastErr || new Error("เรียก Claude ไม่สำเร็จ");
+  throw lastErr || new Error("เรียก Gemini ไม่สำเร็จ");
 }
 
 function parseJSON(text) {
@@ -169,11 +166,10 @@ async function askGeminiVideo(key, prompt) {
 /* ───────────────────────── component ───────────────────────── */
 function AIContentStudio() {
   const [brief, setBrief] = useState("");
-  const [mode, setMode] = useState("post"); // post | tiktok
+  const [mode, setMode] = useState("post");
   const [refImage, setRefImage] = useState(null);
-  const [claudeKey, setClaudeKey] = useState(() => localStorage.getItem("kuan_claude_key") || "");
   const [geminiKey, setGeminiKey] = useState(() => localStorage.getItem("kuan_gemini_key") || "");
-  const [showSettings, setShowSettings] = useState(() => !localStorage.getItem("kuan_claude_key"));
+  const [showSettings, setShowSettings] = useState(() => !localStorage.getItem("kuan_gemini_key"));
   const [messages, setMessages] = useState([]);
   const [running, setRunning] = useState(false);
   const [currentStep, setCurrentStep] = useState(0);
@@ -186,7 +182,6 @@ function AIContentStudio() {
     if (feedRef.current) feedRef.current.scrollTop = feedRef.current.scrollHeight;
   }, [messages, typing]);
 
-  const saveClaudeKey = (v) => { setClaudeKey(v); localStorage.setItem("kuan_claude_key", v); };
   const saveGeminiKey = (v) => { setGeminiKey(v); localStorage.setItem("kuan_gemini_key", v); };
 
   const addMsg = (who, body) =>
@@ -220,9 +215,9 @@ function AIContentStudio() {
   /* ───────────── pipeline หลัก ───────────── */
   const run = async () => {
     if (!brief.trim() || running) return;
-    if (!claudeKey.trim()) {
+    if (!geminiKey.trim()) {
       setShowSettings(true);
-      addMsg("meen", { text: "พี่ยังไม่ได้ใส่ Claude API key เลยจ้า มีนเขียนงานไม่ได้ 🥲 ใส่ key ที่แผงตั้งค่าข้างบนก่อนน้า (เอาจาก console.anthropic.com)" });
+      addMsg("meen", { text: "พี่ยังไม่ได้ใส่ Gemini API key เลยจ้า มีนทำงานไม่ได้ 🥲 ใส่ key ที่แผงตั้งค่าข้างบนก่อนน้า" });
       return;
     }
     setRunning(true);
@@ -237,13 +232,10 @@ function AIContentStudio() {
       /* STEP 1+2 — มีนเขียนคอนเทนต์ + ภีมแต่งพร้อมต์ */
       setTyping("meen");
       const writerParts = [];
-      if (refImage)
-        writerParts.push({
-          type: "image",
-          source: { type: "base64", media_type: refImage.mediaType, data: refImage.data },
-        });
+      if (refImage) {
+        writerParts.push({ inlineData: { mimeType: refImage.mediaType, data: refImage.data } });
+      }
       writerParts.push({
-        type: "text",
         text: `คุณคือ "มีน" ก๊อปปี้ไรเตอร์ Gen Z สายกวนของสตูดิโอคอนเทนต์ไทย เขียนสนุก แสบนิดๆ แต่ขายของเก่ง ใช้ภาษาวัยรุ่นไทยธรรมชาติ ไม่เวอร์จนเลี่ยน
 
 งานวันนี้: สร้าง${modeTh} จากโจทย์ของลูกค้า${refImage ? " (มีรูปอ้างอิงแนบมาด้วย ให้ดูรูปประกอบ)" : ""}
@@ -258,9 +250,9 @@ function AIContentStudio() {
   "imagePrompt": "พร้อมต์ภาษาอังกฤษละเอียดๆ สำหรับเจนรูป${mode === "tiktok" ? "ปกวิดีโอ" : "ประกอบโพสต์"} ระบุสไตล์ แสง สี องค์ประกอบ ให้เหมาะกับฟีด social ของคนรุ่นใหม่"${mode === "tiktok" ? `,
   "videoPrompt": "พร้อมต์ภาษาอังกฤษสำหรับ Veo เจนวิดีโอแนวตั้ง 9:16 ยาว ~8 วินาที อิง Hook ของสคริปต์ บรรยายฉาก แอ็คชั่น มุมกล้อง แสง อารมณ์ ถ้ามีบทพูดสั้นๆ ให้เขียนเป็นภาษาไทยใน quotes พร้อมระบุ tone เสียง"` : ""},
   "meenSay": "ประโยคกวนๆ 1 ประโยคที่มีนพูดตอนส่งงาน"
-}`,
+}`
       });
-      const draft = parseJSON(await askClaude(claudeKey.trim(), writerParts));
+      const draft = parseJSON(await askGeminiText(geminiKey.trim(), writerParts));
       setTyping(null);
       addMsg("meen", {
         text: draft.meenSay || "เสร็จแล้วจ้า งานนี้มีนจัดเต็ม",
@@ -272,7 +264,7 @@ function AIContentStudio() {
       await new Promise((r) => setTimeout(r, 700));
       setTyping(null);
       addMsg("phim", {
-        text: "รับช่วงต่อจากมีนนะ พร้อมต์จัดให้ตามนี้ ใครจะเอาไปเจนที่อื่นก็ก๊อปได้เลย ✌️",
+        text: "รับช่วงต่อจากมีนนะ พร้อมต์จัดให้ตามนี้ ✌️",
         card: {
           title: mode === "tiktok" ? "🎥 Video Prompt (Veo)" : "🎨 Image Prompt",
           body: mode === "tiktok" ? (draft.videoPrompt || draft.imagePrompt) : draft.imagePrompt,
@@ -286,67 +278,62 @@ function AIContentStudio() {
       let genVideo = null;
       let review = null;
 
-      if (geminiKey.trim()) {
-        if (mode === "tiktok") {
-          addMsg("gem", { text: "รับงานวิดีโอครับ 🎬 Veo กำลังถ่าย ใช้เวลาประมาณ 1-3 นาที พี่จิบกาแฟรอแป๊บนะครับ ☕" });
-          setTyping("gem");
-          try {
-            genVideo = await askGeminiVideo(geminiKey.trim(), draft.videoPrompt || draft.imagePrompt);
-            setTyping(null);
-            if (genVideo.objectUrl) {
-              addMsg("gem", { text: "ถ่ายเสร็จ ตัดต่อส่งเข้ากลุ่มแล้วครับผม 🎥", video: genVideo.objectUrl });
-            } else {
-              addMsg("gem", {
-                text: "วิดีโอเสร็จแล้ว แต่เบราว์เซอร์โหลดมาแสดงตรงนี้ไม่ได้ กดลิงก์ด้านล่างดาวน์โหลดได้เลยครับ",
-                link: genVideo.directUrl,
-              });
-            }
-          } catch (e) {
-            setTyping(null);
-            addMsg("gem", { text: `วิดีโอไม่ผ่านครับพี่ 😵 (${e.message}) เดี๋ยวผมเจนรูปปกให้แทนก่อนนะครับ` });
-            setTyping("gem");
-            try {
-              genImage = await askGeminiImage(geminiKey.trim(), draft.imagePrompt, refImage);
-              setTyping(null);
-              addMsg("gem", {
-                text: "รูปปกมาแล้วครับ เอาไปใช้คู่กับสคริปต์ก่อนได้ 📸",
-                image: `data:${genImage.mimeType};base64,${genImage.data}`,
-              });
-            } catch (e2) {
-              setTyping(null);
-              addMsg("gem", { text: `รูปปกก็ไม่ผ่าน 😵‍💫 (${e2.message}) ก๊อปพร้อมต์ของภีมไปเจนเองก่อนนะครับ` });
-            }
+      if (mode === "tiktok") {
+        addMsg("gem", { text: "รับงานวิดีโอครับ 🎬 Veo กำลังถ่าย ใช้เวลาประมาณ 1-3 นาที พี่จิบกาแฟรอแป๊บนะครับ ☕" });
+        setTyping("gem");
+        try {
+          genVideo = await askGeminiVideo(geminiKey.trim(), draft.videoPrompt || draft.imagePrompt);
+          setTyping(null);
+          if (genVideo.objectUrl) {
+            addMsg("gem", { text: "ถ่ายเสร็จ ตัดต่อส่งเข้ากลุ่มแล้วครับผม 🎥", video: genVideo.objectUrl });
+          } else {
+            addMsg("gem", {
+              text: "วิดีโอเสร็จแล้ว กดลิงก์ด้านล่างดาวน์โหลดได้เลยครับ",
+              link: genVideo.directUrl,
+            });
           }
-        } else {
+        } catch (e) {
+          setTyping(null);
+          addMsg("gem", { text: `วิดีโอไม่ผ่านครับพี่ 😵 (${e.message}) เดี๋ยวผมเจนรูปปกให้แทนก่อนนะครับ` });
           setTyping("gem");
           try {
             genImage = await askGeminiImage(geminiKey.trim(), draft.imagePrompt, refImage);
             setTyping(null);
             addMsg("gem", {
-              text: "ถ่ายเสร็จ ส่งไฟล์เข้ากลุ่มแล้วครับผม 📸",
+              text: "รูปปกมาแล้วครับ 📸",
               image: `data:${genImage.mimeType};base64,${genImage.data}`,
             });
-          } catch (e) {
+          } catch (e2) {
             setTyping(null);
-            addMsg("gem", { text: `แย่ละ เจนรูปไม่ผ่าน 😵 (${e.message}) เดี๋ยวส่งพร้อมต์ให้พี่เอาไปเจนเองก่อนนะครับ` });
+            addMsg("gem", { text: `รูปปกก็ไม่ผ่าน 😵‍💫 (${e2.message}) ก๊อปพร้อมต์ของภีมไปเจนเองก่อนนะครับ` });
           }
         }
+      } else {
+        setTyping("gem");
+        try {
+          genImage = await askGeminiImage(geminiKey.trim(), draft.imagePrompt, refImage);
+          setTyping(null);
+          addMsg("gem", {
+            text: "ถ่ายเสร็จ ส่งไฟล์เข้ากลุ่มแล้วครับผม 📸",
+            image: `data:${genImage.mimeType};base64,${genImage.data}`,
+          });
+        } catch (e) {
+          setTyping(null);
+          addMsg("gem", { text: `แย่ละ เจนรูปไม่ผ่าน 😵 (${e.message}) ก๊อปพร้อมต์ของภีมไปเจนเองก่อนนะครับ` });
+        }
+      }
 
-        /* STEP 4 — ก้อง QC */
-        if (genImage || genVideo) {
-          setCurrentStep(4);
-          setTyping("kong");
-          try {
-            let reviewRaw;
-            if (genImage) {
-              reviewRaw = await askClaude(claudeKey.trim(), [
-                {
-                  type: "image",
-                  source: { type: "base64", media_type: genImage.mimeType, data: genImage.data },
-                },
-                {
-                  type: "text",
-                  text: `คุณคือ "ก้อง" QC สายจิกของสตูดิโอคอนเทนต์ Gen Z ไทย ตรวจรูปที่ AI เจนมาว่าตรงโจทย์ไหม
+      /* STEP 4 — ก้อง QC (ใช้ Gemini) */
+      if (genImage || genVideo) {
+        setCurrentStep(4);
+        setTyping("kong");
+        try {
+          let reviewRaw;
+          if (genImage) {
+            reviewRaw = await askGeminiText(geminiKey.trim(), [
+              { inlineData: { mimeType: genImage.mimeType, data: genImage.data } },
+              {
+                text: `คุณคือ "ก้อง" QC สายจิกของสตูดิโอคอนเทนต์ Gen Z ไทย ตรวจรูปที่ AI เจนมาว่าตรงโจทย์ไหม
 
 โจทย์ลูกค้า: """${brief}"""
 พร้อมต์ที่ใช้เจน: """${draft.imagePrompt}"""
@@ -360,43 +347,37 @@ function AIContentStudio() {
   "comment": "คอมเมนต์ภาษากวนๆ แต่ตรงประเด็น 1-2 ประโยค",
   "issues": ["จุดที่ต้องระวังหรือแก้ ถ้าไม่มีให้เป็น array ว่าง"]
 }`,
-                },
-              ]);
-            } else {
-              reviewRaw = await askClaude(claudeKey.trim(), [
-                {
-                  type: "text",
-                  text: `คุณคือ "ก้อง" QC สายจิกของสตูดิโอคอนเทนต์ Gen Z ไทย วิดีโอเจนเสร็จแล้วแต่คุณดูวิดีโอตรงๆ ไม่ได้ ให้ตรวจคุณภาพ "สคริปต์ + พร้อมต์วิดีโอ" แทน ว่าจะออกมาตรงโจทย์ไหม
+              },
+            ]);
+          } else {
+            reviewRaw = await askGeminiText(geminiKey.trim(), [
+              {
+                text: `คุณคือ "ก้อง" QC สายจิกของสตูดิโอคอนเทนต์ Gen Z ไทย วิดีโอเจนเสร็จแล้ว ให้ตรวจคุณภาพ สคริปต์ + พร้อมต์วิดีโอ ว่าจะออกมาตรงโจทย์ไหม
 
 โจทย์ลูกค้า: """${brief}"""
 สคริปต์: """${draft.content}"""
-พร้อมต์วิดีโอที่ใช้เจน: """${draft.videoPrompt || draft.imagePrompt}"""
+พร้อมต์วิดีโอ: """${draft.videoPrompt || draft.imagePrompt}"""
 
-ตรวจ: Hook แรงพอใน 3 วิแรกไหม / เนื้อหาตรงโจทย์ไหม / CTA ชัดไหม / พร้อมต์วิดีโอสื่อภาพตรงสคริปต์ไหม
+ตรวจ: Hook แรงพอใน 3 วิแรกไหม / เนื้อหาตรงโจทย์ไหม / CTA ชัดไหม
 
 ตอบเป็น JSON เท่านั้น:
 {
   "approved": true หรือ false,
   "score": คะแนน 1-10,
-  "comment": "คอมเมนต์ภาษากวนๆ แต่ตรงประเด็น 1-2 ประโยค ปิดท้ายเตือนให้พี่เปิดดูวิดีโอจริงอีกรอบก่อนโพสต์",
+  "comment": "คอมเมนต์ภาษากวนๆ แต่ตรงประเด็น 1-2 ประโยค เตือนให้พี่เปิดดูวิดีโอจริงอีกรอบก่อนโพสต์",
   "issues": ["จุดที่ต้องระวังหรือแก้ ถ้าไม่มีให้เป็น array ว่าง"]
 }`,
-                },
-              ]);
-            }
-            review = parseJSON(reviewRaw);
-          } catch (e) {
-            review = { approved: true, score: 7, comment: "ระบบตรวจสะดุดนิดหน่อย แต่ดูด้วยตาแล้วพอไหวครับพี่", issues: [] };
+              },
+            ]);
           }
-          setTyping(null);
-          addMsg("kong", {
-            text: `${review.approved ? "✅ ผ่าน!" : "⚠️ ยังไม่สุด"} ให้ ${review.score}/10 — ${review.comment}`,
-            list: review.issues?.length ? review.issues : null,
-          });
+          review = parseJSON(reviewRaw);
+        } catch (e) {
+          review = { approved: true, score: 7, comment: "ระบบตรวจสะดุดนิดหน่อย แต่ดูด้วยตาแล้วพอไหวครับพี่", issues: [] };
         }
-      } else {
-        addMsg("gem", {
-          text: "พี่ยังไม่ได้ใส่ Gemini API key ให้ผมเลยครับ 🥲 กดรูปเฟืองข้างบนเพื่อใส่ key ได้ หรือก๊อปพร้อมต์ของภีมไปเจนเองก่อนก็ได้นะ",
+        setTyping(null);
+        addMsg("kong", {
+          text: `${review.approved ? "✅ ผ่าน!" : "⚠️ ยังไม่สุด"} ให้ ${review.score}/10 — ${review.comment}`,
+          list: review.issues?.length ? review.issues : null,
         });
       }
 
@@ -442,21 +423,14 @@ function AIContentStudio() {
 
       {showSettings && (
         <div className="settings">
-          <label>Claude API key (ให้มีนเขียนงาน + ก้องตรวจงาน)</label>
-          <input
-            type="password"
-            value={claudeKey}
-            onChange={(e) => saveClaudeKey(e.target.value)}
-            placeholder="sk-ant-... เอาจาก console.anthropic.com"
-          />
-          <label className="lbl2">Gemini API key (ให้เจมส์เจนรูป/วิดีโอ)</label>
+          <label>Gemini API key (ใช้ทำทุกอย่าง — เขียน เจนรูป เจนวิดีโอ ตรวจงาน)</label>
           <input
             type="password"
             value={geminiKey}
             onChange={(e) => saveGeminiKey(e.target.value)}
             placeholder="วาง key จาก aistudio.google.com ที่นี่"
           />
-          <p className="hint">key ถูกเก็บในเบราว์เซอร์เครื่องนี้เท่านั้น (localStorage) ไม่ถูกส่งขึ้น GitHub และไม่ถูกส่งไปไหนนอกจาก Anthropic / Google โดยตรง</p>
+          <p className="hint">key ถูกเก็บในเบราว์เซอร์เครื่องนี้เท่านั้น (localStorage) ไม่ขึ้น GitHub ไม่ถูกส่งไปไหนนอกจาก Google โดยตรง</p>
         </div>
       )}
 
@@ -473,7 +447,7 @@ function AIContentStudio() {
         {messages.length === 0 && (
           <div className="empty">
             <div className="empty-title">ทีมพร้อมรับงานแล้ว</div>
-            <p>พิมพ์ไอเดียหรือโจทย์ด้านล่าง แนบรูปได้ถ้ามี<br />โหมดโพสต์ได้รูปประกอบ · โหมด TikTok ได้วิดีโอจริงจาก Veo 🎥</p>
+            <p>พิมพ์ไอเดียหรือโจทย์ด้านล่าง แนบรูปได้ถ้ามี<br />โหมดโพสต์ได้รูปประกอบ · โหมด TikTok ได้วิดีโอจริงจาก Veo 🎥<br /><small style={{opacity:.6}}>ขับเคลื่อนทั้งหมดด้วย Gemini</small></p>
             <div className="crew">
               {["meen", "phim", "gem", "kong"].map((k) => (
                 <div key={k} className="crew-card" style={{ borderColor: TEAM[k].color }}>
@@ -615,7 +589,6 @@ ReactDOM.createRoot(document.getElementById("root")).render(<AIContentStudio />)
 .gear{background:none;border:none;font-size:20px;cursor:pointer}
 .settings{background:#fff;border-bottom:3px solid var(--ink);padding:12px 16px}
 .settings label{font-weight:600;font-size:13px}
-.settings .lbl2{display:block;margin-top:10px}
 .settings input{width:100%;margin-top:6px;padding:10px;border:2px solid var(--ink);border-radius:10px;font-size:14px}
 .hint{font-size:11px;opacity:.6;margin-top:6px}
 .stepbar{display:flex;gap:6px;overflow-x:auto;padding:10px 12px;background:#fff;border-bottom:3px solid var(--ink)}
